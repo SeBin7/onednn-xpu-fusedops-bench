@@ -1,0 +1,40 @@
+# XPU container for Intel iGPU/Arc. Minimal: we DO NOT install oneAPI toolkits.
+# We rely on the SYCL/UR libs bundled inside the PyTorch XPU wheels.
+# On WSL2 you must pass /dev/dxg and bind /usr/lib/wsl, see run example below.
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-venv python3-pip \
+    build-essential ca-certificates git \
+    # Helpful for debugging Level Zero presence inside container
+    ocl-icd-libopencl1 \
+ && rm -rf /var/lib/apt/lists/*
+
+# Internal venv to avoid PEP 668 issues
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+
+# Upgrade basics + build helpers
+RUN python -m pip install --upgrade pip wheel setuptools pybind11 ninja
+
+# Install PyTorch XPU wheels (bundles libsycl + UR loader matched to the wheel)
+RUN pip install --index-url https://download.pytorch.org/whl/xpu \
+    torch torchvision torchaudio
+
+# (Optional) If you want IPEX in the container, uncomment:
+# RUN pip install --index-url https://developer.intel.com/ipex-whl-stable-xpu \
+#     intel-extension-for-pytorch
+
+# Copy your repo
+WORKDIR /workspace
+COPY . /workspace
+
+# For XPU runs, we generally don’t need many CPU threads
+ENV OMP_NUM_THREADS=1 \
+    ONEDNN_VERBOSE=0
+
+# By default we just open a shell.
+# You will run with proper device and volume flags from the host.
+CMD ["bash"]

@@ -1,0 +1,31 @@
+cat > .gitignore <<'EOF'
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv*/
+.venv*/
+.env
+.ipynb_checkpoints/
+
+# Build outputs
+build/
+dist/
+*.so
+*.dll
+*.dylib
+*.o
+*.a
+
+# Project specific
+myops_xpu*.so
+*.log
+
+# VSCode / JetBrains / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Docker
+*.tar
+EOF

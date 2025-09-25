@@ -1,0 +1,35 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-venv python3-pip \
+    build-essential ca-certificates git \
+ && rm -rf /var/lib/apt/lists/*
+
+# Create an internal venv to avoid PEP 668 "externally managed" errors
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+
+# Upgrade basics + build helpers
+RUN python -m pip install --upgrade pip wheel setuptools pybind11 ninja
+
+# Install PyTorch CPU wheels
+RUN pip install --index-url https://download.pytorch.org/whl/cpu \
+    torch torchvision torchaudio
+
+# Copy your repo
+WORKDIR /workspace
+COPY . /workspace
+
+# Reasonable CPU defaults (tune to your host)
+ENV OMP_NUM_THREADS=16 \
+    MKL_NUM_THREADS=16 \
+    ONEDNN_VERBOSE=0
+
+# Default shell; run the CLI yourself, e.g.:
+#   docker run --rm -it onednn-mlp:cpu \
+#     python -m xpu_bench.cli --device cpu --precision fp32 \
+#       --batch-size 128 --dataset-size 12800 --epochs 3 \
+#       --layers 20 --hidden 4096 --in-dim 2048 --out-dim 1000 \
+#       --log-interval 10
+CMD ["bash"]
