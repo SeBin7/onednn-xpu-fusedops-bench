@@ -40,6 +40,8 @@ def _common_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--warmup-steps", type=int, default=10)
     p.add_argument("--log-interval", type=int, default=10)
     p.add_argument("--reuse-batch", action="store_true")
+    p.add_argument("--ipex", action="store_true")
+    p.add_argument("--channels-last", action="store_true")
 
 
 def _count_active_fused_layers(model: torch.nn.Module) -> tuple[int, int]:
@@ -121,7 +123,13 @@ def main() -> None:
     if args.task == "mlp":
         env_use_fused = _env_flag("USE_MYOPS")
         fused_requested = args.use_fused or env_use_fused
-        fused_active = fused_requested and device.type == "xpu" and has_myops()
+        # ★ FP32에서만 fused 활성 (BF16은 아직 안정성/성능 이슈 → 폴백)
+        fused_active = (
+            fused_requested
+            and device.type == "xpu"
+            and has_myops()
+            and dtype == torch.float32
+        )
 
         model = build_mlp_model(
             in_dim=args.in_dim,
@@ -130,8 +138,8 @@ def main() -> None:
             out_dim=args.out_dim,
             use_fused=fused_active,
             device=device,
-            dtype=dtype,
         )
+
         if fused_active:
             _preflight_mlp(
                 model,
@@ -144,6 +152,7 @@ def main() -> None:
             fused_active = fused_active and active_layers > 0 and active_layers == total_layers
             if not fused_active:
                 print("[WARN] MLP fused path disabled after preflight (falling back to PyTorch)")
+
         loss_fn = mlp_loss()
         data_iter = mlp_batch_generator(
             dataset_size=args.dataset_size,
@@ -155,7 +164,7 @@ def main() -> None:
             reuse_batch=args.reuse_batch,
         )
         steps = steps_per_epoch(args.dataset_size, args.batch_size)
-        opt = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
+        opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
 
         cfg = TrainConfig(
             device=device,

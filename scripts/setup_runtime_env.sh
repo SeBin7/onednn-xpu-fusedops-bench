@@ -1,28 +1,25 @@
 #!/usr/bin/env bash
-
 set -euo pipefail
 
-# Torch / oneDNN / TBB
-export TORCH_LIB="${TORCH_ROOT:-$(python - <<'PY'
-import importlib.util, pathlib
-print(pathlib.Path(importlib.util.find_spec('torch').origin).parent / 'lib')
+# pip 업그레이드 + 의존성
+if [ -f "/workspace/requirement.txt" ]; then
+  python3 -m pip install --upgrade pip
+  python3 -m pip install -r /workspace/requirement.txt
+fi
+
+# 토치/아이펙스 등 설치가 requirement에 있다면 여기서 잡힘.
+# XPU 가용성 체크(실패해도 진행)
+python3 - << 'PY' || true
+try:
+    import torch
+    has_xpu = hasattr(torch, "xpu")
+    print(f"[check] torch={torch.__version__}, has_xpu={has_xpu}")
+    if has_xpu:
+        try:
+            devs = torch.xpu.device_count()
+            print(f"[check] xpu device_count={devs}")
+        except Exception as e:
+            print("[warn] torch.xpu not usable:", e)
+except Exception as e:
+    print("[warn] torch import failed:", e)
 PY
-)}"
-export DNNL_LIB=/opt/intel/oneapi/dnnl/latest/lib
-export TBB_LIB=/opt/intel/oneapi/tbb/latest/lib/intel64/gcc4.8
-
-# venv 내 추가 so 경로 (선택)
-export VENV_LIB="$(dirname "$(dirname "$(which python)")")/lib"
-
-# oneAPI 수학 런타임을 별도 디렉터리에 링크
-export ONEAPI_COMP_LIB=/opt/intel/oneapi/compiler/latest/lib
-mkdir -p "$HOME/.intelrt"
-ln -sf "$ONEAPI_COMP_LIB/libsvml.so"    "$HOME/.intelrt/"
-ln -sf "$ONEAPI_COMP_LIB/libimf.so"     "$HOME/.intelrt/"
-ln -sf "$ONEAPI_COMP_LIB/libintlc.so.5" "$HOME/.intelrt/"
-
-# LD_LIBRARY_PATH 구성 (ONEAPI_COMP_LIB 는 직접 넣지 않음)
-export LD_LIBRARY_PATH="$TORCH_LIB:$DNNL_LIB:$TBB_LIB:$HOME/.intelrt:$VENV_LIB:/usr/lib/x86_64-linux-gnu"
-
-echo "Runtime environment configured." 
-echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"

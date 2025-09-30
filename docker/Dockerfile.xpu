@@ -1,40 +1,34 @@
-# XPU container for Intel iGPU/Arc. Minimal: we DO NOT install oneAPI toolkits.
-# We rely on the SYCL/UR libs bundled inside the PyTorch XPU wheels.
-# On WSL2 you must pass /dev/dxg and bind /usr/lib/wsl, see run example below.
+FROM intel/intel-extension-for-pytorch:2.8.10-xpu-idp-base
 
-FROM ubuntu:24.04
+# conda env(idp)의 python/pip을 항상 먼저 잡히게 + 시스템 경로에 링크
+ENV PATH=/opt/conda/envs/idp/bin:/opt/conda/bin:$PATH
+RUN ln -sf /opt/conda/envs/idp/bin/python /usr/local/bin/python \
+ && ln -sf /opt/conda/envs/idp/bin/pip    /usr/local/bin/pip
 
-ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-venv python3-pip \
-    build-essential ca-certificates git \
-    # Helpful for debugging Level Zero presence inside container
-    ocl-icd-libopencl1 \
+# 빌드 도구 + Intel oneAPI repo 등록 + oneDNN(SYCL interop) 설치
+# (문제난 RUN 한 블록을 이걸로 교체)
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      ca-certificates curl gnupg build-essential cmake ninja-build pkg-config git \
+ && install -d -m 0755 /usr/share/keyrings /etc/apt/sources.list.d \
+ && /usr/bin/curl -fsSL --retry 5 --retry-connrefused \
+      https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB \
+    | gpg --batch --yes --dearmor -o /usr/share/keyrings/oneapi-archive-keyring.gpg \
+ && echo 'deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main' \
+    > /etc/apt/sources.list.d/oneAPI.list \
+ && apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends intel-oneapi-dnnl-devel \
+ && ldconfig \
  && rm -rf /var/lib/apt/lists/*
 
-# Internal venv to avoid PEP 668 issues
-RUN python3 -m venv /opt/venv
-ENV PATH="/opt/venv/bin:${PATH}"
 
-# Upgrade basics + build helpers
-RUN python -m pip install --upgrade pip wheel setuptools pybind11 ninja
-
-# Install PyTorch XPU wheels (bundles libsycl + UR loader matched to the wheel)
-RUN pip install --index-url https://download.pytorch.org/whl/xpu \
-    torch torchvision torchaudio
-
-# (Optional) If you want IPEX in the container, uncomment:
-# RUN pip install --index-url https://developer.intel.com/ipex-whl-stable-xpu \
-#     intel-extension-for-pytorch
-
-# Copy your repo
 WORKDIR /workspace
-COPY . /workspace
 
-# For XPU runs, we generally don’t need many CPU threads
-ENV OMP_NUM_THREADS=1 \
-    ONEDNN_VERBOSE=0
+# 프로젝트 의존성 설치 (XPU 스택은 이미지에 있으므로 제외)
+COPY requirement.txt /tmp/requirement.txt
+RUN if [ -s /tmp/requirement.txt ]; then \
+      python -m pip install --upgrade pip && \
+      grep -v -E '^(torch|torchvision|torchaudio|pytorch-triton-xpu)\b' /tmp/requirement.txt > /tmp/req.notorch.txt || true; \
+      if [ -s /tmp/req.notorch.txt ]; then pip install -r /tmp/req.notorch.txt; fi \
+    ; fi
 
-# By default we just open a shell.
-# You will run with proper device and volume flags from the host.
-CMD ["bash"]
+SHELL ["/bin/bash", "-lc"]

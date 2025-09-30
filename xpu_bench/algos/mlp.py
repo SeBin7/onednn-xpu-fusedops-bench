@@ -15,7 +15,7 @@ def build_mlp_model(
     out_dim: int,
     use_fused: bool,
     device: torch.device,
-    dtype: torch.dtype,
+    #dtype: torch.dtype,
 ) -> nn.Module:
     """
     use_fused=True & device=xpu 인 경우 core.ops.LinearGELU_Fused 사용하도록
@@ -28,7 +28,7 @@ def build_mlp_model(
         out_dim=out_dim,
         use_fused=use_fused,
         device=device,
-        dtype=dtype,
+        #dtype=dtype,
     )
     return model
 

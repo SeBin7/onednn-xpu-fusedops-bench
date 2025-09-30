@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os, time
+import os, time, random
 from dataclasses import dataclass
 from typing import Callable, Iterable, Tuple, Optional
 
@@ -46,6 +46,38 @@ def train_loop(
     if device.type == "cpu":
         _set_threads_for_cpu()
 
+    # ---- 실행 경로/재현성 명확화 ----
+    # (선택) 재현성: 환경변수 SEED 가 있으면 고정
+    _seed = os.getenv("SEED")
+    if _seed is not None:
+        try:
+            s = int(_seed)
+            torch.manual_seed(s)
+            random.seed(s)
+        except Exception:
+            pass
+
+    # ipex 최적화 경로 토글 (XPU 전용)
+    use_ipex = (device.type == "xpu") and (os.getenv("USE_IPEX_OPT", "0") == "1")
+    if use_ipex:
+        import intel_extension_for_pytorch as ipex
+        # dtype 전달 금지: 파라미터를 FP32로 유지 (연산은 bf16로)
+        opt_kwargs = dict(inplace=True, auto_kernel_selection=True)
+
+        # bf16 + SGD 조합은 IPEX fused SGD 미지원 → optimizer는 감싸지 말고 model만 optimize
+        if isinstance(optimizer, optim.SGD) and cfg.dtype is torch.bfloat16:
+            print("[INFO] IPEX: bf16 + SGD -> model-only optimize (no fused SGD)")
+            model = ipex.optimize(model, **opt_kwargs)
+        else:
+            if is_train and optimizer is not None:
+                model, optimizer = ipex.optimize(model, optimizer=optimizer, **opt_kwargs)
+            else:
+                model = ipex.optimize(model, **opt_kwargs)
+
+        print("[INFO] IPEX optimize: ENABLED")
+    else:
+        print("[INFO] IPEX optimize: DISABLED")
+
     print("====== Core Train Loop ======")
     print(f"device          : {describe_device(device)}")
     print(f"precision       : {cfg.dtype}")
@@ -73,17 +105,45 @@ def train_loop(
     autocast_device = _autocast_device(device)
 
     # warmup (runs once before timed epochs)
+    if cfg.warmup_steps > 0:
+        print(f"\n-- Warmup {cfg.warmup_steps} steps --")
+    w_ips_hist, w_step_times = [], []
+
     for warm_step in range(cfg.warmup_steps):
+        t0 = time.time()
         x, y = _next_batch()
         with torch.autocast(device_type=autocast_device, dtype=cfg.dtype) if use_autocast else _nullcontext():
             out = _forward_model(model, x)
             loss = loss_fn(out, y)
+
         if is_train:
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
+
         synchronize(device)
+        t1 = time.time()
+
+        step_time_ms = (t1 - t0) * 1000.0
+        ips = cfg.batch_size / ((t1 - t0) + 1e-9)
+        w_step_times.append(step_time_ms)
+        w_ips_hist.append(ips)
+
+        # 웜업 단계 로그 (log_interval마다 혹은 마지막 스텝)
+        if ((warm_step + 1) % cfg.log_interval == 0) or (warm_step + 1 == cfg.warmup_steps):
+            loss_val = loss.detach().to(device="cpu", dtype=torch.float32).item()
+            print(f"[W{warm_step+1}/{cfg.warmup_steps}] "
+                  f"loss={loss_val:.4f} ips={ips:,.1f} step_time={step_time_ms:.2f} ms")
+
         global_step += 1
+
+    if w_ips_hist:
+        # 간단 요약
+        mean_ips = sum(w_ips_hist) / len(w_ips_hist)
+        mean_t   = sum(w_step_times) / len(w_step_times)
+        print(f">>> [Warmup Summary] mean_ips={mean_ips:,.1f} "
+              f"mean_step_time={mean_t:.2f} ms")
+
 
     # timed epochs
     for epoch in range(1, cfg.epochs + 1):

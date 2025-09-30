@@ -1,0 +1,13 @@
+.git
+.gitignore
+__pycache__
+*.pyc
+*.pyo
+*.so
+*.dylib
+build/
+dist/
+venv/
+.venv*/
+.env
+.ipynb_checkpoints/

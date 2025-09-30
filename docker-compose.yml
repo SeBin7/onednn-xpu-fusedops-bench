@@ -1,0 +1,36 @@
+services:
+  xpu-dev:
+    container_name: onednn-xpu-dev
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.xpu
+    working_dir: /workspace
+    tty: true
+    stdin_open: true
+    volumes:
+      - .:/workspace
+      - /usr/lib/wsl:/usr/lib/wsl:ro     # (WSL2) GPU 패스스루
+    devices:
+      - /dev/dxg                          # (WSL2) GPU 패스스루
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: /workspace
+      SYCL_DEVICE_FILTER: level_zero:gpu
+      ONEAPI_DEVICE_SELECTOR: level_zero:gpu
+    entrypoint: ["/bin/bash", "-lc", "/workspace/docker/entrypoint.xpu.sh"]
+
+  cpu-dev:
+    container_name: onednn-cpu-dev
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.cpu
+    working_dir: /workspace
+    tty: true
+    stdin_open: true
+    volumes:
+      - .:/workspace
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: /workspace
+      DNNL_VERBOSE: "0"
+    command: ["/bin/bash", "-lc", "bash"]

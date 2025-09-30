@@ -68,6 +68,42 @@ source scripts/setup_runtime_env.sh
 
 ---
 
+## Docker Setup
+
+An XPU-focused image lives at `docker/Dockerfile.xpu`. It layers the Intel oneAPI BaseKit runtime, installs the PyTorch XPU wheels, builds `myops_xpu`, and wires the runtime environment script into the container entrypoint.
+
+### Build
+```bash
+docker build -t onednn-xpu-bench:xpu -f docker/Dockerfile.xpu .
+```
+
+### Run (WSL + Intel GPU)
+```bash
+docker run --rm -it \
+  --device /dev/dxg \
+  --volume /usr/lib/wsl:/usr/lib/wsl \
+  --ipc=host \
+  onednn-xpu-bench:xpu
+```
+Mount `$(pwd)` if you prefer live code edits: add `-v $(pwd):/workspace`. The container lands in `/workspace` with the virtual environment active; `setvars.sh` and `scripts/setup_runtime_env.sh` are sourced for you. For CPU-only experiments you can continue to use `docker/Dockerfile.cpu` (no GPU device flags required).
+
+### docker-compose
+`docker-compose.yml` wires both CPU and XPU targets so you can launch them with a single command.
+
+```bash
+# Build everything once
+docker compose build
+
+# Drop into an interactive XPU shell (WSL + Intel GPU)
+docker compose run --rm xpu
+
+# CPU-only shell (no GPU flags required)
+docker compose run --rm cpu
+```
+`xpu` service already mounts the workspace and WSL GPU paths; update the compose file if your host uses different device nodes.
+
+---
+
 ## Building the Fused Extension
 
 The fused operators are compiled into `myops_xpu$(python-config --extension-suffix)` using the provided helper:
@@ -111,6 +147,7 @@ The helper scripts wrap the long command lines and enforce the clean runtime env
 ./scripts/run_diffusion_fp32.sh xpu
 ./scripts/run_diffusion_fp32.sh xpu_fused
 ```
+Both helper scripts honor `PYTHON_BIN` (defaults to `python`). Inside the Docker images no extra configuration is required; on a local virtualenv export `PYTHON_BIN=/path/to/venv/bin/python` before running if needed.
 `xpu_fused` requests both Linear+GELU and Conv+SiLU fused kernels via `--use-fused`. At startup the CLI prints which fused paths were enabled, so you can confirm whether both operators loaded.
 
 ### BF16 Support

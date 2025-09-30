@@ -1,6 +1,7 @@
 from __future__ import annotations
 import os
 import torch
+from contextlib import contextmanager, nullcontext
 
 _PRECISION2DTYPE = {
     "fp32": torch.float32,
@@ -11,6 +12,25 @@ _PRECISION2DTYPE = {
 def get_dtype(precision: str) -> torch.dtype:
     precision = (precision or "fp32").lower()
     return _PRECISION2DTYPE.get(precision, torch.float32)
+
+def bf16_supported(device: torch.device) -> bool:
+    """장치에서 bf16 연산이 실제로 되는지 소형 연산으로 확인."""
+    try:
+        a = torch.randn(16, 16, device=device, dtype=torch.bfloat16)
+        b = torch.randn(16, 16, device=device, dtype=torch.bfloat16)
+        _ = (a @ b).sum().item()
+        return True
+    except Exception:
+        return False
+
+@contextmanager
+def autocast_ctx(device: torch.device, dtype: torch.dtype):
+    """bf16이면 autocast, 아니면 no-op."""
+    if dtype is torch.bfloat16 and device.type in ("xpu", "cpu"):
+        with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+            yield
+    else:
+        yield
 
 def pick_device(device_str: str) -> torch.device:
     d = (device_str or "cpu").lower()
