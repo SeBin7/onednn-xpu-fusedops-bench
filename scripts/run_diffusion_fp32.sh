@@ -34,6 +34,31 @@ case "$MODE" in
       --device cpu --precision fp32 \
       "${COMMON_ARGS[@]}"
     ;;
+    cuda)
+    # [ADD] CUDA 기본 커널
+    : "${XPU_BENCH_AUTO_BACKEND:=1}"   # MLP → MLP_AutoFused alias(안전, 불가 시 자동 폴백)
+    : "${XPU_FORCE_FUSED:=0}"          # 기본은 강제 off
+    : "${XPU_BENCH_VERBOSE:=1}"        # 로그 보고 싶으면 1
+    export XPU_BENCH_AUTO_BACKEND XPU_FORCE_FUSED XPU_BENCH_VERBOSE
+
+    PYTHONUNBUFFERED=1 \
+    .venv/bin/python -m xpu_bench.cli diffusion \
+      --device cuda --precision fp32 \
+      "${COMMON_ARGS[@]}"
+    ;;
+
+  cuda-fused)
+    # [ADD] CUDA + fused 시도 (가능 시 ENABLED)
+    : "${XPU_BENCH_AUTO_BACKEND:=1}"
+    : "${XPU_FORCE_FUSED:=1}"          # --use-fused 없어도 내부에서 fused 우선 시도
+    : "${XPU_BENCH_VERBOSE:=1}"
+    export XPU_BENCH_AUTO_BACKEND XPU_FORCE_FUSED XPU_BENCH_VERBOSE
+
+    PYTHONUNBUFFERED=1 \
+    .venv/bin/python -m xpu_bench.cli diffusion \
+      --device cuda --precision fp32 --use-fused \
+      "${COMMON_ARGS[@]}"
+    ;;
   xpu)
     env SYCL_DEVICE_FILTER="level_zero:gpu" PYTHONUNBUFFERED=1 ONEDNN_VERBOSE=0 \
         USE_MYOPS=0 \

@@ -122,6 +122,8 @@ def main() -> None:
         env_use_fused = _env_flag("USE_MYOPS")
         fused_requested = args.use_fused or env_use_fused
         fused_active = fused_requested and device.type == "xpu" and has_myops()
+        cuda_compile_requested = fused_requested and device.type == "cuda"
+        cuda_compile_active = False
 
         model = build_mlp_model(
             in_dim=args.in_dim,
@@ -144,6 +146,23 @@ def main() -> None:
             fused_active = fused_active and active_layers > 0 and active_layers == total_layers
             if not fused_active:
                 print("[WARN] MLP fused path disabled after preflight (falling back to PyTorch)")
+        if cuda_compile_requested:
+            capability = torch.cuda.get_device_capability()
+            if capability < (7, 0):
+                print(
+                    f"[WARN] torch.compile requires CUDA capability >= 7.0; "
+                    f"found {capability[0]}.{capability[1]} (running eager)"
+                )
+            elif hasattr(torch, "compile"):
+                compile_mode = os.environ.get("TORCH_COMPILE_MODE", "reduce-overhead")
+                try:
+                    model = torch.compile(model, mode=compile_mode)
+                    cuda_compile_active = True
+                except Exception as exc:
+                    print(f"[WARN] torch.compile CUDA path disabled ({exc}); running eager")
+            else:
+                print("[WARN] --use-fused requested on CUDA but torch.compile is unavailable; running eager")
+
         loss_fn = mlp_loss()
         data_iter = mlp_batch_generator(
             dataset_size=args.dataset_size,
@@ -168,6 +187,8 @@ def main() -> None:
         )
         print(f"[INFO] Fused Linear+GELU: "
               f"{'ENABLED' if fused_active else 'DISABLED'}")
+        if device.type == "cuda":
+            print(f"[INFO] CUDA torch.compile: {'ENABLED' if cuda_compile_active else 'DISABLED'}")
         train_loop(cfg, model, data_iter, loss_fn, optimizer=opt)
         return
 
@@ -176,6 +197,8 @@ def main() -> None:
         env_use_fused = _env_flag("USE_MYOPS")
         fused_requested = args.use_fused or env_use_fused
         fused_active = fused_requested and device.type == "xpu" and has_myops()
+        cuda_compile_requested = fused_requested and device.type == "cuda"
+        cuda_compile_active = False
         if args.use_fused and not fused_active:
             print("[WARN] --use-fused requested but myops_xpu not available or device != xpu; falling back")
         use_channels_last = (device.type == "xpu")
@@ -206,6 +229,22 @@ def main() -> None:
             fused_active = fused_active and active_layers > 0 and active_layers == total_layers
             if not fused_active:
                 print("[WARN] Diffusion fused path disabled after preflight (falling back to PyTorch)")
+        if cuda_compile_requested:
+            capability = torch.cuda.get_device_capability()
+            if capability < (7, 0):
+                print(
+                    f"[WARN] torch.compile requires CUDA capability >= 7.0; "
+                    f"found {capability[0]}.{capability[1]} (running eager)"
+                )
+            elif hasattr(torch, "compile"):
+                compile_mode = os.environ.get("TORCH_COMPILE_MODE", "reduce-overhead")
+                try:
+                    model = torch.compile(model, mode=compile_mode)
+                    cuda_compile_active = True
+                except Exception as exc:
+                    print(f"[WARN] torch.compile CUDA path disabled ({exc}); running eager")
+            else:
+                print("[WARN] --use-fused requested on CUDA but torch.compile is unavailable; running eager")
         betas, alphas_cumprod = make_beta_schedule(args.timesteps, device, dtype)
         loss_fn = diffusion_loss(betas, alphas_cumprod)
 
@@ -240,6 +279,8 @@ def main() -> None:
         fused_conv_active = sum(1 for m in model.modules() if isinstance(m, ConvSiLU) and m.is_active)
         total_conv = sum(1 for m in model.modules() if isinstance(m, ConvSiLU))
         print(f"[INFO] Diffusion Fused Conv+SiLU: {'ENABLED' if fused_conv_active == total_conv and total_conv > 0 else 'DISABLED'}")
+        if device.type == "cuda":
+            print(f"[INFO] Diffusion CUDA torch.compile: {'ENABLED' if cuda_compile_active else 'DISABLED'}")
         train_loop(cfg, model, data_iter, loss_fn, optimizer=opt)
         return
 

@@ -6,7 +6,10 @@ import torch.nn as nn
 
 # UNet은 models/diffusion/unet2d.py 에서
 from ..models.diffusion.unet2d import UNetTiny
+from xpu_bench.core.fuse import apply_fusions  # [ADD]
 
+# model = build_unet(...)
+model = apply_fusions(model, enable=(args.use_fused or os.environ.get("XPU_FORCE_FUSED","0")=="1"))  # [ADD]
 
 def build_diffusion_model(
     *,
