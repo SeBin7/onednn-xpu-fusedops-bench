@@ -1,12 +1,13 @@
 from __future__ import annotations
 import os
 import torch
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 
+# Map precision flag to torch dtype
 _PRECISION2DTYPE = {
     "fp32": torch.float32,
     "bf16": torch.bfloat16,
-    "fp16": torch.float16,  # (CUDA/XPU 일부 op 제한 주의)
+    "fp16": torch.float16,  # partial support across devices
 }
 
 def get_dtype(precision: str) -> torch.dtype:
@@ -14,7 +15,7 @@ def get_dtype(precision: str) -> torch.dtype:
     return _PRECISION2DTYPE.get(precision, torch.float32)
 
 def bf16_supported(device: torch.device) -> bool:
-    """장치에서 bf16 연산이 실제로 되는지 소형 연산으로 확인."""
+    """Quick check if bf16 math works on the given device."""
     try:
         a = torch.randn(16, 16, device=device, dtype=torch.bfloat16)
         b = torch.randn(16, 16, device=device, dtype=torch.bfloat16)
@@ -25,8 +26,11 @@ def bf16_supported(device: torch.device) -> bool:
 
 @contextmanager
 def autocast_ctx(device: torch.device, dtype: torch.dtype):
-    """bf16이면 autocast, 아니면 no-op."""
-    if dtype is torch.bfloat16 and device.type in ("xpu", "cpu"):
+    """
+    Optional autocast context for bf16.
+    NOTE: XPU support for torch.autocast may vary by PyTorch build. Use only if verified.
+    """
+    if dtype is torch.bfloat16 and device.type in ("xpu", "cpu", "cuda"):
         with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
             yield
     else:
@@ -36,7 +40,7 @@ def pick_device(device_str: str) -> torch.device:
     d = (device_str or "cpu").lower()
     if d == "xpu":
         if not torch.xpu.is_available():
-            raise RuntimeError("XPU is not available. Check driver/runtime and SYCL_DEVICE_FILTER.")
+            raise RuntimeError("XPU is not available. Check drivers/runtime and SYCL_DEVICE_FILTER.")
         return torch.device("xpu")
     if d == "cuda":
         if not torch.cuda.is_available():
@@ -62,10 +66,12 @@ def describe_device(device: torch.device) -> str:
     if device.type == "cuda":
         return f"cuda (name={torch.cuda.get_device_name(0)})"
     if device.type == "cpu":
-        # 안전 가드: 0 또는 음수 피함
+        # Ensure a positive thread count for logging
         try:
-            nt = max(1, int(os.environ.get("OMP_NUM_THREADS", "0") or torch.get_num_threads()))
+            nt_env = os.environ.get("OMP_NUM_THREADS", "")
+            nt = int(nt_env) if nt_env else torch.get_num_threads()
+            nt = max(1, nt)
         except Exception:
-            nt = torch.get_num_threads()
+            nt = max(1, torch.get_num_threads())
         return f"cpu (threads={nt})"
     return device.type

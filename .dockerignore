@@ -1,13 +1,27 @@
-.git
-.gitignore
-__pycache__
+# Python
+__pycache__/
 *.pyc
-*.pyo
-*.so
-*.dylib
+
+# venv
+.venv/
+.venv-*/
+
+# build artifacts
 build/
-dist/
-venv/
-.venv*/
-.env
-.ipynb_checkpoints/
+cuda/build/
+*.egg-info/
+cuda/*.egg-info/
+*.so
+*.pyd
+
+# editor/OS
+.vscode/
+.idea/
+.DS_Store
+
+# docker
+*.log
+
+# misc
+*.deb
+EOF

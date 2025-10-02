@@ -1,13 +1,13 @@
 from __future__ import annotations
 import os, time, random
 from dataclasses import dataclass
-from typing import Callable, Iterable, Tuple, Optional
+from typing import Callable, Iterable, Optional
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from .device import pick_device, get_dtype, describe_device, synchronize
+from .device import describe_device, synchronize
 
 @dataclass
 class TrainConfig:
@@ -20,7 +20,7 @@ class TrainConfig:
     log_interval: int = 10
 
 def _set_threads_for_cpu() -> None:
-    # set_num_threads 는 양수만 허용 → 안전 가드
+    """Apply OMP_NUM_THREADS if provided; ensure a positive value."""
     try:
         nt = int(os.environ.get("OMP_NUM_THREADS", "0") or "0")
     except Exception:
@@ -35,7 +35,7 @@ def train_loop(
     cfg: TrainConfig,
     model: nn.Module,
     data_iter: Iterable,
-    loss_fn: Callable[[torch.Tensor, torch.Tensor | None], torch.Tensor],
+    loss_fn: Callable[[torch.Tensor, Optional[torch.Tensor]], torch.Tensor],
     optimizer: Optional[optim.Optimizer] = None,
     targets_iter: Optional[Iterable] = None,
 ) -> None:
@@ -46,8 +46,7 @@ def train_loop(
     if device.type == "cpu":
         _set_threads_for_cpu()
 
-    # ---- 실행 경로/재현성 명확화 ----
-    # (선택) 재현성: 환경변수 SEED 가 있으면 고정
+    # Reproducibility (optional)
     _seed = os.getenv("SEED")
     if _seed is not None:
         try:
@@ -57,24 +56,24 @@ def train_loop(
         except Exception:
             pass
 
-    # ipex 최적화 경로 토글 (XPU 전용)
-    use_ipex = (device.type == "xpu") and (os.getenv("USE_IPEX_OPT", "0") == "1")
-    if use_ipex:
+    # IPEX optimize: if CLI already did it, skip here (robust guard)
+    cli_ipex_done_flag = globals().get("_CLI_IPEX_OPT_DONE", False)
+    env_ipex_done_flag = (os.getenv("CLI_IPEX_OPT_DONE", "0") == "1")
+    use_ipex = (device.type in ("xpu","cpu")) and (os.getenv("USE_IPEX_OPT", "0") == "1")
+    if use_ipex and (cli_ipex_done_flag or env_ipex_done_flag):
+        print("[INFO] IPEX optimize: SKIPPED (done in CLI)")
+    elif use_ipex:
         import intel_extension_for_pytorch as ipex
-        # dtype 전달 금지: 파라미터를 FP32로 유지 (연산은 bf16로)
-        opt_kwargs = dict(inplace=True, auto_kernel_selection=True)
-
-        # bf16 + SGD 조합은 IPEX fused SGD 미지원 → optimizer는 감싸지 말고 model만 optimize
-        if isinstance(optimizer, optim.SGD) and cfg.dtype is torch.bfloat16:
-            print("[INFO] IPEX: bf16 + SGD -> model-only optimize (no fused SGD)")
-            model = ipex.optimize(model, **opt_kwargs)
+        opt_dtype = cfg.dtype if cfg.dtype in (torch.bfloat16, torch.float16) else torch.float32
+        opt_kwargs = dict(inplace=True, auto_kernel_selection=True, dtype=opt_dtype)
+        if is_train:
+            if optimizer is None:
+                raise RuntimeError("IPEX training optimize requires an optimizer.")
+            model, optimizer = ipex.optimize(model, optimizer=optimizer, **opt_kwargs)
+            print(f"[INFO] IPEX optimize: ENABLED (train, dtype={opt_dtype})")
         else:
-            if is_train and optimizer is not None:
-                model, optimizer = ipex.optimize(model, optimizer=optimizer, **opt_kwargs)
-            else:
-                model = ipex.optimize(model, **opt_kwargs)
-
-        print("[INFO] IPEX optimize: ENABLED")
+            model = ipex.optimize(model, **opt_kwargs)
+            print(f"[INFO] IPEX optimize: ENABLED (eval, dtype={opt_dtype})")
     else:
         print("[INFO] IPEX optimize: DISABLED")
 
@@ -97,14 +96,14 @@ def train_loop(
         except StopIteration as exc:
             raise RuntimeError(
                 "Data iterator exhausted during training. "
-                "Provide an iterator that can yield enough batches (e.g., an infinite generator)."
+                "Provide an iterator that can yield enough batches."
             ) from exc
         return _unpack_batch(batch, targets_stream)
 
     use_autocast = _use_autocast(cfg.dtype, device)
     autocast_device = _autocast_device(device)
 
-    # warmup (runs once before timed epochs)
+    # ---- Warmup (not timed for throughput) ----
     if cfg.warmup_steps > 0:
         print(f"\n-- Warmup {cfg.warmup_steps} steps --")
     w_ips_hist, w_step_times = [], []
@@ -112,7 +111,7 @@ def train_loop(
     for warm_step in range(cfg.warmup_steps):
         t0 = time.time()
         x, y = _next_batch()
-        with torch.autocast(device_type=autocast_device, dtype=cfg.dtype) if use_autocast else _nullcontext():
+        with (torch.autocast(device_type=autocast_device, dtype=cfg.dtype) if use_autocast else _nullcontext()):
             out = _forward_model(model, x)
             loss = loss_fn(out, y)
 
@@ -129,7 +128,6 @@ def train_loop(
         w_step_times.append(step_time_ms)
         w_ips_hist.append(ips)
 
-        # 웜업 단계 로그 (log_interval마다 혹은 마지막 스텝)
         if ((warm_step + 1) % cfg.log_interval == 0) or (warm_step + 1 == cfg.warmup_steps):
             loss_val = loss.detach().to(device="cpu", dtype=torch.float32).item()
             print(f"[W{warm_step+1}/{cfg.warmup_steps}] "
@@ -138,28 +136,27 @@ def train_loop(
         global_step += 1
 
     if w_ips_hist:
-        # 간단 요약
         mean_ips = sum(w_ips_hist) / len(w_ips_hist)
         mean_t   = sum(w_step_times) / len(w_step_times)
         print(f">>> [Warmup Summary] mean_ips={mean_ips:,.1f} "
               f"mean_step_time={mean_t:.2f} ms")
 
-
-    # timed epochs
+    # ---- Timed epochs ----
     for epoch in range(1, cfg.epochs + 1):
         print(f"\n-- Epoch {epoch}/{cfg.epochs} --")
         t_epoch_start = time.time()
         loss_accum = torch.zeros((), device="cpu", dtype=torch.float32)
-        ips_hist = []
-        step_times = []
+        ips_hist: list[float] = []
+        step_times: list[float] = []
         seen_steps = 0
 
         for step in range(1, cfg.steps_per_epoch + 1):
             t0 = time.time()
             x, y = _next_batch()
-            with torch.autocast(device_type=autocast_device, dtype=cfg.dtype) if use_autocast else _nullcontext():
+            with (torch.autocast(device_type=autocast_device, dtype=cfg.dtype) if use_autocast else _nullcontext()):
                 out = _forward_model(model, x)
                 loss = loss_fn(out, y)
+
             if is_train:
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
@@ -168,7 +165,7 @@ def train_loop(
             synchronize(device)
             t1 = time.time()
 
-            step_time = (t1 - t0) * 1000.0  # ms
+            step_time = (t1 - t0) * 1000.0
             ips = cfg.batch_size / ((t1 - t0) + 1e-9)
             loss_accum = loss_accum + loss.detach().to(device="cpu", dtype=torch.float32)
             seen_steps += 1
@@ -203,26 +200,26 @@ def _unpack_batch(batch, targets_iter):
             y = next(targets_iter)
         except StopIteration as exc:
             raise RuntimeError(
-                "Targets iterator exhausted before data iterator. "
-                "Ensure targets_iter can yield as many items as needed."
+                "Targets iterator exhausted before data iterator."
             ) from exc
     return x, y
 
 def _autocast_device(device: torch.device) -> str:
-    # torch.autocast는 "cuda"/"cpu"만 명시적 지원.
-    # XPU는 내부적으로 cpu path와 유사 처리되므로 autocast는 사용하지 않고 dtype만 맞춤.
+    # torch.autocast supports "cuda" and "cpu"
     return "cuda" if device.type == "cuda" else "cpu"
 
 def _use_autocast(dtype: torch.dtype, device: torch.device) -> bool:
+    # Enable autocast on CUDA for fp16/bf16, and on CPU for bf16.
     if device.type == "cuda" and dtype in (torch.float16, torch.bfloat16):
         return True
-    # XPU는 PyTorch autocast 경로 미사용(여기서는 명시적 캐스팅 케이스를 모델/데이터가 처리)
+    if device.type == "cpu" and dtype is torch.bfloat16:
+        return True
+    # XPU path: rely on IPEX optimize (set in CLI) instead of torch.autocast.
     return False
 
 class _nullcontext:
     def __enter__(self): return None
     def __exit__(self, *args): return False
-
 
 def _forward_model(model: nn.Module, x):
     if isinstance(x, dict):
